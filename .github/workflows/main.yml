@@ -1,0 +1,117 @@
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create Custom RDP User
+        run: |
+          # BIKIN USERNAME & PASSWORD LU DI SINI (Ganti tulisan di dalem tanda kutip)
+          $user = "Nelsen" 
+          $pass = "KetintangKeras2026!" 
+          
+          # Proses inject password beneran ke dalam sistem Windows
+          $securePass = ConvertTo-SecureString $pass -AsPlainText -Force
+          New-LocalUser -Name $user -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $user
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
+          
+          # Pake trik Out-File UTF8 biar variabelnya gak cacat karena encoding Windows
+          echo "CURRENT_USER=$user" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "CURRENT_PASS=$pass" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          
+          # Bikin Env Var global biar setup_apps.ps1 tetep jalan
+          echo "RDP_USERNAME=$user" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          
+          if (-not (Get-LocalUser -Name $user)) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+      - name: Run Setup Apps Script
+        env:
+          RDP_USERNAME: ${{ secrets.RDP_USERNAME }}
+          WA_URL: ${{ secrets.WA_DESKTOP_URL }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if (Test-Path ".\setup_apps.ps1") {
+              Write-Host "Menjalankan script instalasi setup_apps.ps1..."
+              .\setup_apps.ps1
+          } else {
+              Write-Warning "File setup_apps.ps1 TIDAK DITEMUKAN di root repository! Skip instalasi aplikasi."
+          }
+
+      - name: Install Tailscale
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = Join-Path $env:TEMP "tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          $tsExe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+          # Ganti hostname pake nama permanen kesukaan lu
+          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=Nelsen-RDP
+         
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & $tsExe ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $env:CURRENT_USER"
+          Write-Host "Password: $env:CURRENT_PASS"
+          Write-Host "==================`n"
+
+          # Loop ping tiap 20 detik ke IP HP lu biar Tailscale gak mati/idle di tengah jalan
+          while ($true) {
+              ping -n 3 100.108.224.68 > $null
+              Start-Sleep -Seconds 20
+          }
+          

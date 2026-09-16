@@ -1,7 +1,4 @@
-# ==========================================
-# PENGINSTALAN APP BERSIH & FIXED ICONS
-# ==========================================
-
+#NERUSEN
 $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
